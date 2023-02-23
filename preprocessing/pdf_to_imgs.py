@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 DPI = 72 # default PDF DPI
+GRID_LAYERS = ["grid", "calibration", "grille"]
 
 
 def write_svg(svg: str, filename: str) -> None:
@@ -19,7 +20,7 @@ def page_to_png(folder: Path, page: fitz.Page, layer_name: str) -> None:
             # there's nothing on this page, skip it
             print(f"Skipping page {page.number} {layer_name}, no content")
         else:
-            pix.save(folder / f"page{page.number:02d}-{layer_name}.png")
+            pix.save(folder / f"{page.number:02d}-{layer_name}.png")
     except OSError as e:
         print(e)
 
@@ -37,6 +38,16 @@ def explode_pdf(doc: fitz.Document) -> None:
     try:
         # turn off all layers
         ui_configs = doc.layer_ui_configs()
+
+        # first turn off any of the grid/calibration layers
+        for layer in ui_configs:
+            if any(grid in layer["text"].lower() for grid in GRID_LAYERS):
+                doc.set_layer_ui_config(layer["number"], action=2)
+
+        # then save an image of all the rest of the layers
+        for page in doc:
+            page_to_png(im_dir, page, "all_layers")
+
         for layer in ui_configs:
             doc.set_layer_ui_config(layer["number"], action=2)
 
@@ -45,9 +56,13 @@ def explode_pdf(doc: fitz.Document) -> None:
             page_to_png(im_dir, page, "background")
 
         for layer in ui_configs:
+            layer_name = layer["text"].replace(" ", "")
+            if any(grid in layer_name.lower() for grid in GRID_LAYERS):
+                # skip the grid layers
+                continue
+
             # turn on the current layer
             doc.set_layer_ui_config(layer["number"], action=0)
-            layer_name = layer["text"].replace(" ", "")
 
             # write the current layer to an image
             for page in doc:
