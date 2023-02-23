@@ -20,7 +20,7 @@ def page_to_png(folder: Path, page: fitz.Page, layer_name: str) -> None:
             # there's nothing on this page, skip it
             print(f"Skipping page {page.number} {layer_name}, no content")
         else:
-            pix.save(folder / f"{page.number:02d}-{layer_name}.png")
+            pix.save(folder / f"{folder.stem}-p{page.number:02d}-{layer_name}.png")
     except OSError as e:
         print(e)
 
