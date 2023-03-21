@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 DPI = 72 # default PDF DPI
-GRID_LAYERS = ["grid", "calibration", "grille"]
+GRID_LAYERS = ["grid", "calibration", "grille", "calibrage"]
 
 
 def write_svg(svg: str, filename: str) -> None:
