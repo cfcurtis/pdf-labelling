@@ -2,8 +2,26 @@ import sys
 from pathlib import Path
 import json
 import fitz
+from PIL import Image, ImageDraw
 
 import common as c
+
+
+def preview_page(page: fitz.Page, labels=None) -> None:
+    """
+    Helper function to preview a page for debugging.
+    """
+    pix = page.get_pixmap()
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    if labels:
+        # draw bounding boxes representing the labels
+        draw = ImageDraw.Draw(img)
+        for label in labels:
+            rect = to_pdf_bbox(label)
+            draw.rectangle(rect, outline="red")
+            draw.text((rect.x0, rect.y0), label["rectanglelabels"][0], fill="red")
+
+    img.show()
 
 
 def get_doc_info(label_data: dict) -> dict:
@@ -23,24 +41,50 @@ def get_doc_info(label_data: dict) -> dict:
 def to_pdf_bbox(label: dict) -> fitz.Rect:
     """
     Converts the label studio bbox coordinates to pdf coordinates.
+    Label studio coordinates appear to be percentages of the image size.
     """
+    x_scale = label["original_width"] / 100
+    y_scale = label["original_height"] / 100
     return fitz.Rect(
-        label["x"],
-        label["y"],
-        label["y"] + label["height"],
-        label["x"] + label["width"]
+        label["x"] * x_scale,
+        label["y"] * y_scale,
+        (label["x"] + label["width"]) * x_scale,
+        (label["y"] + label["height"]) * y_scale,
     )
 
 
 def process_labels(page: fitz.Page, label_data: dict) -> list:
     """
-    Processes the label data and returns a list of features.
+    Processes the label data for a given page and returns a list of features.
     """
     features = []
     for label in label_data["label"]:
         bbox = to_pdf_bbox(label)
+        page.set_cropbox(bbox)
+        pix = page.get_pixmap(dpi=c.DPI)
+        svg = page.get_svg_image(text_as_path=False)
+
+        # if it's a pattern piece, extract an svg for every layer
+        if label["rectanglelabels"][0] == "pattern piece":
+            svg = {"all": svg}
+            for layer in page.parent.layer_ui_configs():
+                name = layer["text"]
+                c.activate_named_layers(page.parent, [name])
+                svg[name] = page.get_svg_image(text_as_path=False)
+
+        text = ""
         if label["rectanglelabels"][0] in c.TEXT_LABELS:
             text = page.get_textbox(bbox)
+        features.append(
+            {
+                "label": label["rectanglelabels"][0],
+                "pixmap": pix,
+                "svg": svg,
+                "text": text,
+            }
+        )
+
+    return features
 
 
 def main(label_path: Path, pdf_root: Path = c.PDF_ROOT) -> None:
@@ -51,13 +95,12 @@ def main(label_path: Path, pdf_root: Path = c.PDF_ROOT) -> None:
     for label_data in all_label_data:
         pdf_info = get_doc_info(label_data)
         doc = fitz.open(pdf_root / f"{pdf_info['number']}.pdf")
-        
+
         # select the specified layers and page
-        if pdf_info['layer'] == 'all_layers':
+        if pdf_info["layer"] == "all_layers":
             c.activate_all_layers(doc)
         else:
-            c.deactivate_all_layers(doc)
-            doc.set_layer_ui_config(pdf_info['layer'], action=0)
+            c.activate_named_layers(doc, [pdf_info["layer"]])
 
         features = process_labels(doc[pdf_info["page"]], label_data)
 
