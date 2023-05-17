@@ -38,18 +38,21 @@ def get_doc_info(label_data: dict) -> dict:
     return info
 
 
-def to_pdf_bbox(label: dict) -> fitz.Rect:
+def to_pdf_bbox(label: dict, page: fitz.Page) -> fitz.Rect:
     """
     Converts the label studio bbox coordinates to pdf coordinates.
     Label studio coordinates appear to be percentages of the image size.
     """
     x_scale = label["original_width"] / 100
     y_scale = label["original_height"] / 100
+    
+    # make sure the bounding box is within the page mediabox
+    mbox = page.mediabox
     return fitz.Rect(
-        label["x"] * x_scale,
-        label["y"] * y_scale,
-        (label["x"] + label["width"]) * x_scale,
-        (label["y"] + label["height"]) * y_scale,
+        max(label["x"] * x_scale, mbox[0]),
+        max(label["y"] * y_scale, mbox[1]),
+        min((label["x"] + label["width"]) * x_scale, mbox[2]),
+        min((label["y"] + label["height"]) * y_scale, mbox[3]),
     )
 
 
@@ -59,10 +62,15 @@ def process_labels(page: fitz.Page, label_data: dict) -> list:
     """
     features = []
     for label in label_data["label"]:
-        bbox = to_pdf_bbox(label)
+        img_mat = fitz.Matrix(fitz.Identity)
+        if label["rotation"]:
+            # img_mat.prerotate(-label["rotation"])
+            pass
+
+        bbox = to_pdf_bbox(label, page)
         page.set_cropbox(bbox)
-        pix = page.get_pixmap(dpi=c.DPI)
-        svg = page.get_svg_image(text_as_path=False)
+        pix = page.get_pixmap(matrix=img_mat, dpi=c.DPI)
+        svg = page.get_svg_image(matrix=img_mat, text_as_path=False)
 
         # if it's a pattern piece, extract an svg for every layer
         if label["rectanglelabels"][0] == "pattern piece":
@@ -102,6 +110,8 @@ def main(label_path: Path, pdf_root: Path = c.PDF_ROOT) -> None:
         else:
             c.activate_named_layers(doc, [pdf_info["layer"]])
 
+        # Make sure the mediabox isn't some weird arbitrary set of coordinates
+        doc[pdf_info["page"]].mediabox.normalize()
         features = process_labels(doc[pdf_info["page"]], label_data)
 
 
