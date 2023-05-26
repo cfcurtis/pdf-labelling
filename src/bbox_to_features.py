@@ -3,7 +3,6 @@ from pathlib import Path
 import json
 import fitz
 from PIL import Image, ImageDraw
-from typing import Callable
 
 import common as c
 
@@ -70,22 +69,24 @@ def to_pdf_bbox(label: dict, page: fitz.Page) -> fitz.Rect:
     return bbox
 
 
-def extract_img(page: fitz.Page, label: dict) -> Image:
+def extract_img(page: fitz.Page, label: dict) -> Image.Image | None:
     """
     Extracts the image from the page and returns it as a PIL Image.
-    Upsamples by 4x (a DPI of 288)
+    Upsamples by 4x (a DPI of 288). If the image has no meaningful content, returns None.
     """
-    bbox = to_pdf_bbox(label, page)
-    pix = page.get_pixmap(dpi=c.DPI * 4, clip=bbox)
-    return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    pix = page.get_pixmap(dpi=c.DPI * 4)
+
+    # if the pixmap is all one colour, don't return it
+    pil_img = None
+    if pix.color_count() > 1:
+        pil_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    return pil_img
 
 
 def extract_svg(page: fitz.Page, label: dict) -> dict:
     """
     Extracts the image from the page and returns it as a dictionary of strings.
     """
-    bbox = to_pdf_bbox(label, page)
-    page.set_cropbox(bbox)
     c.activate_all_layers(page.parent)
     svg = {"all_layers": page.get_svg_image(text_as_path=False)}
 
@@ -95,6 +96,8 @@ def extract_svg(page: fitz.Page, label: dict) -> dict:
             name = layer["text"]
             c.activate_named_layers(page.parent, [name])
             svg[name] = page.get_svg_image(text_as_path=False)
+
+    c.activate_all_layers(page.parent)
     return svg
 
 
@@ -111,29 +114,34 @@ def create_annotation(page: fitz.Page, label: dict) -> None:
     annot.update()
 
 
-def process_labels(
-    page: fitz.Page, label_data: dict, proc: Callable[[fitz.Page, dict], any], **kwargs
-) -> list:
+def process_labels(page: fitz.Page, label_data: dict, **kwargs) -> list:
     """
     Processes the label data for a given page and returns a list of features.
     """
     features = []
+    feat_counter = 0
     for label in label_data["label"]:
-        result = proc(page, label)
-        if result:
-            features.append(result)
+        bbox = to_pdf_bbox(label, page)
+        page.set_cropbox(bbox)
+        pix = extract_img(page, label)
+        if not pix:
+            continue
 
-        # text = ""
-        # if label["rectanglelabels"][0] in c.TEXT_LABELS:
-        #     text = page.get_textbox(bbox)
-        # features.append(
-        #     {
-        #         "label": label["rectanglelabels"][0],
-        #         "pixmap": pix,
-        #         "svg": svg,
-        #         "text": text,
-        #     }
-        # )
+        svg = extract_svg(page, label)
+        text = ""
+        if label["rectanglelabels"][0] in c.TEXT_LABELS:
+            text = page.get_textbox(bbox)
+
+        features.append(
+            {
+                "label": label["rectanglelabels"][0],
+                "number": feat_counter,
+                "pixmap": pix,
+                "svg": svg,
+                "text": text,
+            }
+        )
+        feat_counter += 1
 
     return features
 
@@ -161,20 +169,20 @@ def main(label_path: Path, pdf_root: Path = c.PDF_ROOT, docs: str | list = []) -
 
         # Make sure the mediabox isn't some weird arbitrary set of coordinates
         doc[pdf_info["page"]].mediabox.normalize()
-        features = process_labels(doc[pdf_info["page"]], label_data, extract_svg)
+        features = process_labels(doc[pdf_info["page"]], label_data)
 
         # save the svgs to a folder
         folder = Path(f"output/{pdf_info['number']}")
         if not folder.exists():
             folder.mkdir(parents=True)
 
-        for svg, label in zip(features, label_data["label"]):
+        for feat, label in zip(features, label_data["label"]):
             base_path = str(
                 folder
-                / f"p{pdf_info['page']}_{c.sanitize(label['rectanglelabels'][0])}_"
+                / f"p{pdf_info['page']}_{c.sanitize(label['rectanglelabels'][0])}_{feat['number']}_"
             )
-            # TODO: Exclude ones that are just white, and fix the naming so labels aren't overwritten (add a number)
-            for layer, text in svg.items():
+
+            for layer, text in feat["svg"].items():
                 svg_path = base_path + c.sanitize(layer) + ".svg"
                 try:
                     c.write_svg(text, svg_path)

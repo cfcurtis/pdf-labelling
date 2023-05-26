@@ -162,6 +162,7 @@ cython_debug/
 # Exclude test files
 *.pdf
 *.png
+*.svg
 
 # vscode configuration
 .vscode/
