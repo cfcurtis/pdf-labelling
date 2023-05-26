@@ -5,6 +5,12 @@ DPI = 72  # default PDF DPI
 GRID_LAYERS = ["grid", "calibration", "grille", "calibrage"]
 PDF_ROOT = Path("/projects/pattern-labelling/documents/processed_pdfs")
 TEXT_LABELS = ["piece label"]
+MULTI_LAYER = [
+    "pattern piece",
+    "notch",
+    "alternate cut line",
+    "detail cut (notch, button, keyhole ..)",
+]
 
 
 def activate_all_layers(doc: fitz.Document) -> None:
@@ -46,7 +52,6 @@ def activate_named_layers(doc: fitz.Document, layers: list) -> None:
             doc.set_layer_ui_config(layer["number"], action=0)
 
 
-
 def write_svg(svg: str, filename: str) -> None:
     """Writes the svg string to the given filename."""
     with open(filename, "w") as f:
@@ -64,3 +69,8 @@ def page_to_png(folder: Path, page: fitz.Page, layer_name: str) -> None:
             pix.save(folder / f"{folder.stem}-p{page.number:02d}-{layer_name}.png")
     except OSError as e:
         print(e)
+
+
+def sanitize(name: str) -> str:
+    """Removes characters that are not allowed in filenames."""
+    return name.replace(" ", "_").replace("/", "_").replace("\\", "_").replace(".", "")

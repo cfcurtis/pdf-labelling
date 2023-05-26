@@ -46,29 +46,56 @@ def to_pdf_bbox(label: dict, page: fitz.Page) -> fitz.Rect:
     """
     x_scale = label["original_width"] / 100
     y_scale = label["original_height"] / 100
-    
-    # make sure the bounding box is within the page mediabox
-    mbox = page.mediabox
-    return fitz.Rect(
-        max(label["x"] * x_scale, mbox[0]),
-        max(label["y"] * y_scale, mbox[1]),
-        min((label["x"] + label["width"]) * x_scale, mbox[2]),
-        min((label["y"] + label["height"]) * y_scale, mbox[3]),
+
+    # if the label has rotation, find the bounding box of the rotated label
+    bbox = fitz.Rect(
+        label["x"] * x_scale,
+        label["y"] * y_scale,
+        (label["x"] + label["width"]) * x_scale,
+        (label["y"] + label["height"]) * y_scale,
     )
+
+    if label["rotation"]:
+        # just expand the bbox to include the rotated image
+        to_origin = fitz.Matrix(fitz.Identity).pretranslate(-bbox.x0, -bbox.y0)
+        rotation = fitz.Matrix(fitz.Identity).prerotate(label["rotation"])
+        shift_back = fitz.Matrix(fitz.Identity).pretranslate(bbox.x0, bbox.y0)
+
+        bbox.transform(to_origin)
+        bbox.transform(rotation)
+        bbox.transform(shift_back)
+
+    # make sure the bounding box is within the page mediabox
+    bbox.intersect(page.mediabox)
+    return bbox
+
 
 def extract_img(page: fitz.Page, label: dict) -> Image:
     """
     Extracts the image from the page and returns it as a PIL Image.
+    Upsamples by 4x (a DPI of 288)
     """
-    img_mat = fitz.Matrix(fitz.Identity)
-    if label["rotation"]:
-        img_mat.pretranslate(-label['x'], -label['y'])
-        img_mat.prerotate(label["rotation"])
-        img_mat.pretranslate(label['x'], label['y'])
-    
-    page.set_cropbox(to_pdf_bbox(label, page))
-    pix = page.get_pixmap(matrix=img_mat, dpi=c.DPI)
+    bbox = to_pdf_bbox(label, page)
+    pix = page.get_pixmap(dpi=c.DPI * 4, clip=bbox)
     return Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+
+
+def extract_svg(page: fitz.Page, label: dict) -> dict:
+    """
+    Extracts the image from the page and returns it as a dictionary of strings.
+    """
+    bbox = to_pdf_bbox(label, page)
+    page.set_cropbox(bbox)
+    c.activate_all_layers(page.parent)
+    svg = {"all_layers": page.get_svg_image(text_as_path=False)}
+
+    # if it's one of the label types that applies to multiple layers, get the svg for each one
+    if label["rectanglelabels"][0] in c.MULTI_LAYER:
+        for layer in page.parent.layer_ui_configs():
+            name = layer["text"]
+            c.activate_named_layers(page.parent, [name])
+            svg[name] = page.get_svg_image(text_as_path=False)
+    return svg
 
 
 def create_annotation(page: fitz.Page, label: dict) -> None:
@@ -78,13 +105,15 @@ def create_annotation(page: fitz.Page, label: dict) -> None:
     bbox = to_pdf_bbox(label, page)
     annot = page.add_rect_annot(bbox)
     annot.set_name(label["rectanglelabels"][0])
-    annot.set_flags(2) # hidden
+    annot.set_flags(2)  # hidden
     annot.set_rotation(int(label["rotation"]))
     # annot.set_oc() # set the optional content group, eventually
     annot.update()
 
 
-def process_labels(page: fitz.Page, label_data: dict, proc: Callable[[fitz.Page, dict], any]) -> list:
+def process_labels(
+    page: fitz.Page, label_data: dict, proc: Callable[[fitz.Page, dict], any], **kwargs
+) -> list:
     """
     Processes the label data for a given page and returns a list of features.
     """
@@ -93,17 +122,6 @@ def process_labels(page: fitz.Page, label_data: dict, proc: Callable[[fitz.Page,
         result = proc(page, label)
         if result:
             features.append(result)
-        # page.set_cropbox(bbox)
-        # pix = page.get_pixmap(matrix=img_mat, dpi=c.DPI)
-        # svg = page.get_svg_image(matrix=img_mat, text_as_path=False)
-
-        # # if it's a pattern piece, extract an svg for every layer
-        # if label["rectanglelabels"][0] == "pattern piece":
-        #     svg = {"all": svg}
-        #     for layer in page.parent.layer_ui_configs():
-        #         name = layer["text"]
-        #         c.activate_named_layers(page.parent, [name])
-        #         svg[name] = page.get_svg_image(text_as_path=False)
 
         # text = ""
         # if label["rectanglelabels"][0] in c.TEXT_LABELS:
@@ -127,7 +145,7 @@ def main(label_path: Path, pdf_root: Path = c.PDF_ROOT, docs: str | list = []) -
     all_label_data = json.load(label_path.open())
     if isinstance(docs, str):
         docs = [docs]
-    
+
     for label_data in all_label_data:
         pdf_info = get_doc_info(label_data)
         if docs and pdf_info["number"] not in docs:
@@ -143,7 +161,25 @@ def main(label_path: Path, pdf_root: Path = c.PDF_ROOT, docs: str | list = []) -
 
         # Make sure the mediabox isn't some weird arbitrary set of coordinates
         doc[pdf_info["page"]].mediabox.normalize()
-        features = process_labels(doc[pdf_info["page"]], label_data, extract_img)
+        features = process_labels(doc[pdf_info["page"]], label_data, extract_svg)
+
+        # save the svgs to a folder
+        folder = Path(f"output/{pdf_info['number']}")
+        if not folder.exists():
+            folder.mkdir(parents=True)
+
+        for svg, label in zip(features, label_data["label"]):
+            base_path = str(
+                folder
+                / f"p{pdf_info['page']}_{c.sanitize(label['rectanglelabels'][0])}_"
+            )
+            # TODO: Exclude ones that are just white, and fix the naming so labels aren't overwritten (add a number)
+            for layer, text in svg.items():
+                svg_path = base_path + c.sanitize(layer) + ".svg"
+                try:
+                    c.write_svg(text, svg_path)
+                except IOError:
+                    print(f"Could not write {svg_path}, skipping")
 
         # doc.save(pdf_root / f"{pdf_info['number']}_annotated.pdf")
 
